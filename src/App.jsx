@@ -474,7 +474,10 @@ class App extends React.Component {
     this._supabaseUser = null;
     this.setState({
       auth: Object.assign({}, this.state.auth, { loggedIn:false, password:'', error:'' }),
-      accounts: [], transactions: [], categories: [], groups: [], budgets: [],
+      accounts: [], transactions: [], categories: [], groups: [], budgets: [], categoryNotes: [],
+      budgetEdits: {}, noteEdits: {}, selectedTxnIds: {},
+      detailCategoryId: null, targetEditor: null, moveMoney: null, budgetKeypad: null,
+      statsPopoverOpen: false, mobileMoreOpen: false,
     });
   }
   showForgotPassword(){ this.setState({ auth: Object.assign({}, this.state.auth, { mode:'forgot', error:'', info:'' }) }); }
@@ -579,6 +582,7 @@ class App extends React.Component {
     const m = this.state.modal; const d = m.data; const s = this.store;
     if (m.kind==='move'){ this.doMoveMoney(); return; }
     if (m.kind==='import'){ this.doImport(d.text); return; }
+    if (m.kind==='deleteCategory'){ this.confirmDeleteCategoryWithReassign(); return; }
     if (m.kind==='group'){
       const name=(d.name||'').trim(); if(!name){ this.closeModal(); return; }
       if(m.mode==='edit'){
@@ -621,7 +625,34 @@ class App extends React.Component {
   confirmDel(msg){ return this.props.confirmDeletes===false ? true : window.confirm(msg); }
   delAccount(a){ if(this.confirmDel('Eliminare il conto "'+a.name+'"? I movimenti collegati resteranno.')){ this.store.remove('Accounts',a.id); this.refresh(); } }
   delTransaction(t){ if(this.confirmDel('Eliminare questo movimento?')){ this.store.remove('Transactions',t.id); this.refresh(); } }
-  delCategory(c){ if(this.confirmDel('Eliminare la categoria "'+c.name+'"?')){ this.store.remove('Categories',c.id); this.refresh(); } }
+  delCategory(c){
+    const hasBudgetData = this.state.budgets.some(b=>b.categoryId===c.id && this.parseNum(b.assigned)>0.005);
+    const txnCount = this.state.transactions.filter(t=>t.categoryId===c.id).length;
+    if(txnCount>0){
+      // Ci sono movimenti collegati: invece di lasciarli "senza categoria", chiediamo
+      // subito a quale altra categoria spostarli (o "nessuna", se preferito).
+      this.openModal('deleteCategory','create',{ categoryId:c.id, categoryName:c.name, categoryType:c.type, txnCount, targetCategoryId:'', hasBudgetData });
+      return;
+    }
+    let msg = 'Eliminare la categoria "'+c.name+'"?';
+    if(hasBudgetData) msg += ' Gli eventuali importi assegnati a questa categoria torneranno nel "Pronto per assegnare".';
+    if(!this.confirmDel(msg)) return;
+    this.state.budgets.filter(b=>b.categoryId===c.id).forEach(b=>this.store.remove('Budgets', b.id));
+    this.state.categoryNotes.filter(n=>n.categoryId===c.id).forEach(n=>this.store.remove('CategoryNotes', n.id));
+    this.store.remove('Categories', c.id);
+    this.refresh();
+  }
+  confirmDeleteCategoryWithReassign(){
+    const d = this.state.modal.data; if(!d || !d.categoryId) return;
+    const targetId = d.targetCategoryId || '';
+    this.state.transactions.filter(t=>t.categoryId===d.categoryId).forEach(t=>{
+      this.store.update('Transactions', t.id, { categoryId: targetId });
+    });
+    this.state.budgets.filter(b=>b.categoryId===d.categoryId).forEach(b=>this.store.remove('Budgets', b.id));
+    this.state.categoryNotes.filter(n=>n.categoryId===d.categoryId).forEach(n=>this.store.remove('CategoryNotes', n.id));
+    this.store.remove('Categories', d.categoryId);
+    this.closeModal(); this.refresh();
+  }
   deleteFromModal(){ const m=this.state.modal; const d=m.data; const map={account:'Accounts',transaction:'Transactions',category:'Categories'}; if(m.kind==='group'){ this.closeModal(); this.delGroup(d.origName); return; } if(this.confirmDel('Eliminare definitivamente?')){ this.store.remove(map[m.kind], d.id); this.closeModal(); this.refresh(); } }
 
   // Come il campo "Importo" dei movimenti: mentre scrivi teniamo solo il testo grezzo
@@ -1712,8 +1743,8 @@ class App extends React.Component {
     const isTransactionModal = m.kind==='transaction';
     const isTransferModal = isTransactionModal && d.type==='Transfer';
     const showCategoryField = isTransactionModal && d.type!=='Transfer';
-    const modalTitles = { account: m.mode==='edit'?'Modifica conto':'Nuovo conto', transaction: m.mode==='edit'?'Modifica movimento':'Nuovo movimento', category: m.mode==='edit'?'Modifica categoria':'Nuova categoria', group: m.mode==='edit'?'Modifica gruppo':'Nuovo gruppo', import:'Importa movimenti', move:'Sposta fondi' };
-    const saveLabel = m.kind==='import' ? 'Importa' : (m.kind==='move' ? 'Sposta' : 'Salva');
+    const modalTitles = { account: m.mode==='edit'?'Modifica conto':'Nuovo conto', transaction: m.mode==='edit'?'Modifica movimento':'Nuovo movimento', category: m.mode==='edit'?'Modifica categoria':'Nuova categoria', group: m.mode==='edit'?'Modifica gruppo':'Nuovo gruppo', import:'Importa movimenti', move:'Sposta fondi', deleteCategory:'Elimina categoria' };
+    const saveLabel = m.kind==='import' ? 'Importa' : (m.kind==='move' ? 'Sposta' : (m.kind==='deleteCategory' ? 'Elimina e sposta' : 'Salva'));
     const accountTypeOptions = this.accountTypes.map(x=>({ value:x[0], label:x[1] }));
     const modalAccountSource = isTransactionModal ? st.accounts.filter(a => a.showInNewTransactions!==false || a.id===d.accountId || a.id===d.toAccountId) : st.accounts;
     const modalAccountOptions = modalAccountSource.map(a=>({ value:a.id, label:a.name }));
@@ -1820,7 +1851,8 @@ class App extends React.Component {
       onNewIncomeCat:()=>this.newCategory('Income'), onNewExpenseCat:()=>this.newCategory('Expense'), onNewGroup:()=>this.newGroup(),
       // modal
       modalOpen:m.open, modalTitle:modalTitles[m.kind]||'', modalKind:m.kind,
-      isAccountModal:m.kind==='account', isTransactionModal, isCategoryModal:m.kind==='category', isGroupModal:m.kind==='group',
+      isAccountModal:m.kind==='account', isTransactionModal, isCategoryModal:m.kind==='category', isGroupModal:m.kind==='group', isDeleteCategoryModal:m.kind==='deleteCategory',
+      categoryReassignOptions: m.kind==='deleteCategory' ? st.categories.filter(x=>x.type===d.categoryType && x.id!==d.categoryId && !x.hidden).map(x=>({ value:x.id, label:x.name })) : [],
       isTransferModal, isMoveModal, moveFromName, moveFromAvailText, moveToOptions, showCategoryField, accountFieldLabel: isTransferModal?'Conto di origine':'Conto',
       data:d, onField:(e)=>this.onField(e), onSave:()=>this.saveModal(), onClose:()=>this.closeModal(),
       onBackdrop:(e)=>{ if(!e.target.closest('[data-modal-card]')) this.closeModal(); },
@@ -2069,6 +2101,8 @@ class App extends React.Component {
       isTransactionModal,
       isCategoryModal,
       isGroupModal,
+      isDeleteCategoryModal,
+      categoryReassignOptions,
       isTransferModal,
       isMoveModal,
       moveFromName,
@@ -2140,7 +2174,8 @@ class App extends React.Component {
               <input type="text" inputMode="decimal" value={data.amount} onChange={onField} data-field="amount" placeholder="0,00" style={{padding:'10px 12px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', fontSize:'14px', fontFamily:'\'JetBrains Mono\',monospace'}} /></label></React.Fragment>) : null}{/* IMPORT FORM */}{(isImportModal) ? (<React.Fragment><div style={{fontSize:'12.5px', color:C.t1, lineHeight:'1.6'}}>Carica un file <b style={{color:C.t0}}>CSV</b> (separatore <span style={{color:(isLight?'#3d6fd6':'#5b8def'), fontFamily:'\'JetBrains Mono\',monospace'}}>;</span>) oppure incolla i dati qui sotto. Il conto deve corrispondere per nome; le categorie mancanti vengono create.</div><div style={{background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', padding:'10px 12px', fontFamily:'\'JetBrains Mono\',monospace', fontSize:'11px', color:C.t2, overflowX:'auto', whiteSpace:'nowrap'}}>Data;Descrizione;Conto;Conto destinazione;Tipo;Categoria;Importo;Note;Stato</div><div style={{display:'flex', gap:'12px', alignItems:'center', flexWrap:'wrap'}}><label style={{display:'inline-flex', alignItems:'center', gap:'7px', padding:'9px 14px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({display:'inline-flex', alignItems:'center', gap:'7px', padding:'9px 14px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:C.b2})}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4" /><polyline points="7 9 12 4 17 9" /><path d="M5 20h14" /></svg>
                 Scegli file
                 <input type="file" accept=".csv,text/csv" onChange={onImportFile} style={{display:'none'}} /></label><button onClick={onDownloadTemplate} style={{background:'none', border:'none', color:(isLight?'#3d6fd6':'#5b8def'), fontSize:'12.5px', fontWeight:'600', cursor:'pointer', padding:'0'}}>Scarica modello</button>{(importHasFile) ? (<React.Fragment><span style={{fontSize:'12px', color:(isLight?'#0b7d45':'#3ecf8e'), fontWeight:'600'}}>{importFileName}</span></React.Fragment>) : null}</div><textarea value={data.text} onChange={onField} data-field="text" placeholder="01/07/2026;Spesa;Revolut;;Uscita;Spesa alimentare;42,50;;Non liquidato" rows="5" style={{width:'100%', resize:'vertical', padding:'10px 12px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', fontSize:'12px', color:C.t0, fontFamily:'\'JetBrains Mono\',monospace', lineHeight:'1.5'}}></textarea></React.Fragment>) : null}{/* GROUP FORM */}{(isGroupModal) ? (<React.Fragment><label style={{display:'flex', flexDirection:'column', gap:'6px', fontSize:'12px', color:C.t1, fontWeight:'600'}}>Nome del gruppo
-              <input type="text" value={data.name} onChange={onField} data-field="name" placeholder="es. Obblighi fissi" style={{padding:'10px 12px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', fontSize:'14px'}} /></label><label style={{display:'flex', alignItems:'center', gap:'8px', fontSize:'12.5px', color:C.t1, cursor:'pointer'}}><input type="checkbox" checked={!!data.fixed} onChange={onField} data-field="fixed" style={{width:'16px', height:'16px', accentColor:'#5b8def', cursor:'pointer'}} />Gruppo di spese fisse (usato nel report "Spese fisse vs variabili")</label><div style={{fontSize:'12px', color:C.t2, lineHeight:'1.5'}}>I gruppi organizzano le categorie di uscita nel budget. Rinominando un gruppo, tutte le categorie collegate vengono aggiornate.</div></React.Fragment>) : null}</div><div style={{display:'flex', gap:'10px', justifyContent:'space-between', alignItems:'center', padding:'16px 20px', borderTop:'1px solid '+C.b2}}>{(canDelete) ? (<React.Fragment><button onClick={onModalDelete} style={{padding:'9px 14px', background:'transparent', border:'1px solid '+C.delBorder, borderRadius:'9px', color:(isLight?'#d93025':'#f0616d'), fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 14px', background:'transparent', border:'1px solid '+C.delBorder, borderRadius:'9px', color:(isLight?'#d93025':'#f0616d'), fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:'#f0616d', color:'#fff', borderColor:'#f0616d'})}>Elimina</button></React.Fragment>) : null}<div style={{display:'flex', gap:'10px', marginLeft:'auto'}}><button onClick={onClose} style={{padding:'9px 16px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 16px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:C.b2})}>Annulla</button><button onClick={onSave} style={{padding:'9px 18px', background:'#5b8def', border:'none', borderRadius:'9px', color:'#fff', fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 18px', background:'#5b8def', border:'none', borderRadius:'9px', color:'#fff', fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:'#6f9bf2'})}>{saveLabel}</button></div></div></div></div></React.Fragment>) : null}</div></React.Fragment>
+              <input type="text" value={data.name} onChange={onField} data-field="name" placeholder="es. Obblighi fissi" style={{padding:'10px 12px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', fontSize:'14px'}} /></label><label style={{display:'flex', alignItems:'center', gap:'8px', fontSize:'12.5px', color:C.t1, cursor:'pointer'}}><input type="checkbox" checked={!!data.fixed} onChange={onField} data-field="fixed" style={{width:'16px', height:'16px', accentColor:'#5b8def', cursor:'pointer'}} />Gruppo di spese fisse (usato nel report "Spese fisse vs variabili")</label><div style={{fontSize:'12px', color:C.t2, lineHeight:'1.5'}}>I gruppi organizzano le categorie di uscita nel budget. Rinominando un gruppo, tutte le categorie collegate vengono aggiornate.</div></React.Fragment>) : null}{/* DELETE CATEGORY (RIASSEGNA MOVIMENTI) FORM */}{(isDeleteCategoryModal) ? (<React.Fragment><div style={{fontSize:'13px', color:C.t0, lineHeight:'1.6'}}>La categoria "<b>{data.categoryName}</b>" ha <b>{data.txnCount}</b> movimen{data.txnCount===1?'to':'ti'} collegat{data.txnCount===1?'o':'i'}. Scegli a quale categoria spostarli prima di eliminarla.</div><label style={{display:'flex', flexDirection:'column', gap:'6px', fontSize:'12px', color:C.t1, fontWeight:'600'}}>Sposta i movimenti in
+              <select value={data.targetCategoryId||''} onChange={onField} data-field="targetCategoryId" style={{padding:'10px 12px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'9px', fontSize:'14px', color:C.t0}}><option value="">Nessuna categoria (lascia senza categoria)</option>{(categoryReassignOptions || []).map((opt, oi) => (<React.Fragment key={oi}><option value={opt.value}>{opt.label}</option></React.Fragment>))}</select></label>{(data.hasBudgetData) ? (<React.Fragment><div style={{fontSize:'12px', color:C.t2, lineHeight:'1.5'}}>Gli eventuali importi assegnati a questa categoria torneranno nel "Pronto per assegnare".</div></React.Fragment>) : null}</React.Fragment>) : null}</div><div style={{display:'flex', gap:'10px', justifyContent:'space-between', alignItems:'center', padding:'16px 20px', borderTop:'1px solid '+C.b2}}>{(canDelete) ? (<React.Fragment><button onClick={onModalDelete} style={{padding:'9px 14px', background:'transparent', border:'1px solid '+C.delBorder, borderRadius:'9px', color:(isLight?'#d93025':'#f0616d'), fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 14px', background:'transparent', border:'1px solid '+C.delBorder, borderRadius:'9px', color:(isLight?'#d93025':'#f0616d'), fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:'#f0616d', color:'#fff', borderColor:'#f0616d'})}>Elimina</button></React.Fragment>) : null}<div style={{display:'flex', gap:'10px', marginLeft:'auto'}}><button onClick={onClose} style={{padding:'9px 16px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 16px', background:C.b1, border:'1px solid '+C.b3, borderRadius:'9px', color:C.t0, fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:C.b2})}>Annulla</button><button onClick={onSave} style={{padding:'9px 18px', background:'#5b8def', border:'none', borderRadius:'9px', color:'#fff', fontSize:'13px', fontWeight:'600', cursor:'pointer'}} {...hoverStyle({padding:'9px 18px', background:'#5b8def', border:'none', borderRadius:'9px', color:'#fff', fontSize:'13px', fontWeight:'600', cursor:'pointer'}, {background:'#6f9bf2'})}>{saveLabel}</button></div></div></div></div></React.Fragment>) : null}</div></React.Fragment>
     );
   }
 }
