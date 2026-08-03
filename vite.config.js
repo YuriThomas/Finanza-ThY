@@ -10,5 +10,5 @@ import react from '@vitejs/plugin-react';
 // itself is literally named "<user>.github.io") — set base back to '/'.
 export default defineConfig({
   plugins: [react()],
-  base: '/Finanza-Ynab/',
+  base: '/Finanza-ThY/',
 });
