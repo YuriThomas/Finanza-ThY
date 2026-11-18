@@ -29,6 +29,7 @@ export const DASH_TABS = [
   ['budgetvs','Budget vs consuntivo'],
   ['entrate','Entrate e risparmio'],
   ['patrimonio','Patrimonio'],
+  ['investimenti','Investimenti'],
 ];
 
 const ACC_CLASS = {
@@ -42,6 +43,8 @@ const ACC_CLASSES = [
   { key:'altro', label:'Altri beni', color:'#8b7cf6' },
 ];
 const LIQUID_TYPES = { 'Current Account':1, 'Card':1, 'Cash':1, 'Deposit':1 };
+// Conti valutati a valore di mercato (inserito a mano a fine mese).
+export const INVEST_TYPES = { 'Broker':1, 'Crypto':1, 'Pension Fund':1 };
 
 const MONO = "'JetBrains Mono',monospace";
 const PALETTE = ['#5b8def','#3ecf8e','#e2b341','#8b7cf6','#f0616d','#4bb6c9','#e08a4b','#c98bd0'];
@@ -63,6 +66,24 @@ const fmtK = (n) => { const a=Math.abs(n); const s=n<0?'−':''; if(a>=1000) ret
 const niceMax = (v) => { if(!(v>0)) return 10; const p = Math.pow(10, Math.floor(Math.log10(v))); const n = v/p; const s = n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10; return s*p; };
 const sum = (arr) => arr.reduce((s,v)=>s+v,0);
 const ma3 = (vals) => vals.map((v,i)=> i<2 ? null : (vals[i]+vals[i-1]+vals[i-2])/3);
+
+/* Rendimento annuo ponderato sui flussi (XIRR). flows: [{ t: ms, v }]
+   v < 0 = denaro versato, v > 0 = denaro ricevuto (prelievi, valore finale). */
+function xirr(flows){
+  const f = flows.filter(x => Math.abs(x.v) > 0.005).sort((a,b) => a.t - b.t);
+  if(f.length < 2 || !f.some(x => x.v > 0) || !f.some(x => x.v < 0)) return null;
+  const t0 = f[0].t; const yr = (t) => (t - t0) / (365 * 864e5);
+  const npv = (r) => f.reduce((s,x) => s + x.v / Math.pow(1 + r, yr(x.t)), 0);
+  let lo = -0.9999, hi = 10, flo = npv(lo), fhi = npv(hi);
+  if(!isFinite(flo) || !isFinite(fhi) || flo * fhi > 0) return null;
+  let mid = 0;
+  for(let i=0; i<200; i++){
+    mid = (lo + hi) / 2; const fm = npv(mid);
+    if(Math.abs(fm) < 1e-6) break;
+    if(flo * fm < 0){ hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+  }
+  return mid;
+}
 
 function buildIndex(txns, parseNum){
   const exp={}, inc={}, incCat={}, byMonth={};
@@ -306,7 +327,7 @@ function LineTrend({ C, labels, values, color, extra }){
 }
 
 /* Entrate (blu) e spese (arancio); area verde dove entrate > spese, rossa al contrario. */
-function IncomeExpenseChart({ C, P, labels, income, expense, onMonth }){
+function IncomeExpenseChart({ C, P, labels, income, expense, onMonth, aColor, bColor, bDash, aName, bName, aria }){
   const [ref, W] = useWidth();
   const H = 220, l = 42, r = 10, t = 10, b = 24;
   const n = labels.length; const iw = Math.max(10, W-l-r), ih = H-t-b;
@@ -325,19 +346,19 @@ function IncomeExpenseChart({ C, P, labels, income, expense, onMonth }){
     }
   }
   const path = (vals) => vals.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
-  const every = n > 8 && W < 520 ? 2 : 1;
+  const every = Math.max(n > 8 && W < 520 ? 2 : 1, Math.ceil(n / Math.max(1, Math.floor(iw / 46))));
   return (
     <div ref={ref} style={{ width:'100%' }}>
-      <svg width={W} height={H} style={{ display:'block' }} role="img" aria-label="Entrate e spese negli ultimi mesi">
+      <svg width={W} height={H} style={{ display:'block' }} role="img" aria-label={aria || 'Entrate e spese negli ultimi mesi'}>
         {[0, maxY/2, maxY].map((v,i)=>(<g key={i}><line x1={l} x2={l+iw} y1={y(v)} y2={y(v)} stroke={C.b1} /><text x={l-6} y={y(v)+4} textAnchor="end" fontSize="10.5" fill={C.t2}>{fmtK(v)}</text></g>))}
         {polys.map((p,i)=>(<polygon key={i} points={p.pts.map(q=>q[0].toFixed(1)+','+q[1].toFixed(1)).join(' ')} fill={p.pos ? P.green : P.red} opacity="0.2" />))}
-        <path d={path(expense)} fill="none" stroke="#e08a4b" strokeWidth="2.2" strokeLinejoin="round" />
-        <path d={path(income)} fill="none" stroke="#5b8def" strokeWidth="2.2" strokeLinejoin="round" />
+        <path d={path(expense)} fill="none" stroke={bColor || '#e08a4b'} strokeWidth="2.2" strokeLinejoin="round" strokeDasharray={bDash || undefined} />
+        <path d={path(income)} fill="none" stroke={aColor || '#5b8def'} strokeWidth="2.2" strokeLinejoin="round" />
         {labels.map((lb,i)=>(
           <g key={i} style={{ cursor:'pointer' }} onClick={()=>onMonth(i)}>
             <rect x={x(i)-iw/(2*Math.max(1,n-1))} y={t} width={iw/Math.max(1,n-1)} height={ih} fill="transparent" />
             {(i % every === 0) ? <text x={x(i)} y={H-6} textAnchor="middle" fontSize="10.5" fill={C.t2}>{lb}</text> : null}
-            <title>{lb + ' · entrate ' + e0(income[i]) + ' · spese ' + e0(expense[i])}</title>
+            <title>{lb + ' · ' + (aName || 'entrate') + ' ' + e0(income[i]) + ' · ' + (bName || 'spese') + ' ' + e0(expense[i])}</title>
           </g>
         ))}
       </svg>
@@ -469,6 +490,8 @@ export default function Dashboard({ app }){
   const [showAllCats, setShowAllCats] = React.useState(false);
   const [plan, setPlan] = React.useState(null);
   const [editTargets, setEditTargets] = React.useState(false);
+  const [classifyOpen, setClassifyOpen] = React.useState(false);
+  const [valDraft, setValDraft] = React.useState(null);
   const touchX = React.useRef(null);
 
   /* ---- impostazioni (target risparmio e regola 50/30/20, salvati nel record Settings) ---- */
@@ -495,6 +518,35 @@ export default function Dashboard({ app }){
   const idxA = React.useMemo(() => dash.accountId ? buildIndex(st.transactions.filter(t => t.accountId===dash.accountId || t.toAccountId===dash.accountId), pn) : idx, [idx, st.transactions, dash.accountId]); // eslint-disable-line react-hooks/exhaustive-deps
   const bal = React.useMemo(() => buildBalances(st.accounts, st.transactions, pn), [st.accounts, st.transactions]); // eslint-disable-line react-hooks/exhaustive-deps
   const bud = React.useMemo(() => { const m={}; st.budgets.forEach(b => { if(!b.month) return; (m[b.month]||(m[b.month]={}))[b.categoryId] = pn(b.assigned); }); return m; }, [st.budgets]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ---- valore di mercato degli investimenti (modalità A: valutazioni mensili inserite a mano) ---- */
+  const isInvest = (a) => !!(a && INVEST_TYPES[a.type]);
+  const valuations = app.store ? app.store.all('Valuations') : [];
+  const valsByAcc = {};
+  valuations.forEach(v => { (valsByAcc[v.accountId] || (valsByAcc[v.accountId] = [])).push(v); });
+  Object.keys(valsByAcc).forEach(k => valsByAcc[k].sort((a,b) => a.month.localeCompare(b.month)));
+  const lastValAt = (accId, mo) => { let r = null; for(const v of (valsByAcc[accId] || [])){ if(v.month <= mo) r = v; else break; } return r; };
+  // Valore a fine mese: ultima valutazione + movimenti successivi; senza valutazioni resta il saldo contabile.
+  const accVal = (a, mo) => {
+    const book = bal.at(a.id, mo);
+    if(!isInvest(a)) return book;
+    const v = lastValAt(a.id, mo);
+    return v ? pn(v.value) + (book - bal.at(a.id, v.month)) : book;
+  };
+  // Flussi esterni dei conti di investimento (prospettiva dell'investitore: versamento < 0, prelievo > 0).
+  const invFlows = React.useMemo(() => {
+    const m = {}; const first = {};
+    const push = (id, date, v) => { (m[id] || (m[id] = [])).push({ date, v }); };
+    st.transactions.forEach(t => {
+      const d = t.date || ''; if(!d) return;
+      [t.accountId, t.toAccountId].forEach(id => { if(id && (!first[id] || d < first[id])) first[id] = d; });
+      if(t.type !== 'Transfer') return;
+      const a = pn(t.amount);
+      push(t.toAccountId, d, -a);
+      push(t.accountId, d, a);
+    });
+    return { m, first };
+  }, [st.transactions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const spentCat = (ix, mo, cid) => ((ix.exp[mo]||{})[cid]) || 0;
   const budCat = (mo, cid) => ((bud[mo]||{})[cid]) || 0;
@@ -541,7 +593,7 @@ export default function Dashboard({ app }){
     return { value: income - spent - fixedResidual - savingsPlanned, income, spent, fixedResidual, savingsPlanned };
   };
 
-  const netWorthAt = (mo) => sum(st.accounts.map(a => bal.at(a.id, mo)));
+  const netWorthAt = (mo) => sum(st.accounts.map(a => accVal(a, mo)));
   const liquidAt = (mo) => sum(st.accounts.filter(a => a.onBudget!==false && LIQUID_TYPES[a.type]).map(a => bal.at(a.id, mo)));
   const drill = (from, to, extra) => app.setState({ view:'transactions', drawerOpen:false, txnLimit:150, filters: Object.assign({ from, to, accountId: dash.accountId||'', categoryId:'', type:'', search:'' }, extra||{}) });
   const drillMonth = (mo, extra) => drill(mo+'-01', app.lastDayOf(mo), extra);
@@ -589,10 +641,36 @@ export default function Dashboard({ app }){
     </div>
   );
 
+  // Classificazione dei gruppi in macro-gruppi, direttamente dalla Dashboard.
+  const setGroupMacro = (g, macro) => {
+    if(!app.store || !g.id) return;
+    app.store.update('Groups', g.id, { macro, fixed: macro==='fisse' });
+    app.refresh();
+  };
+  const classifyPanel = (
+    <div style={{ display:'flex', flexDirection:'column', gap:'8px', marginTop:'12px' }}>
+      {st.groups.map(g => {
+        const val = g.macro || (g.fixed ? 'fisse' : '');
+        return (
+          <label key={g.id || g.name} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', fontSize:'13px' }}>
+            <span style={{ fontWeight:600, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{g.name}</span>
+            <select value={val} onChange={(e) => setGroupMacro(g, e.target.value)} aria-label={'Macro-gruppo di ' + g.name}
+              style={Object.assign({}, selectStyle, { flexShrink:0, minWidth:'170px', border:'1px solid '+(val ? C.b2 : P.amber) })}>
+              <option value="">Da classificare</option>
+              {MACROS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+            </select>
+          </label>
+        );
+      })}
+    </div>
+  );
   const unclassifiedNote = (unclassified > 0 && (tab==='overview' || tab==='spese' || tab==='entrate' || tab==='budgetvs')) ? (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', flexWrap:'wrap', padding:'10px 14px', marginBottom:'16px', borderRadius:'10px', background: isLight ? '#fbf1e1' : 'rgba(226,179,65,0.10)', border:'1px solid '+(isLight ? '#ecd3a8' : 'rgba(226,179,65,0.25)'), fontSize:'12.5px', color:C.t0 }}>
-      <span>{unclassified === 1 ? '1 gruppo non ha' : unclassified + ' gruppi non hanno'} un macro-gruppo: per ora {unclassified === 1 ? 'conta' : 'contano'} come «Variabili essenziali». Assegnalo dalla modifica del gruppo.</span>
-      <button onClick={() => app.go('categories')} style={{ padding:'6px 11px', borderRadius:'8px', border:'1px solid '+C.b3, background:C.bg2, color:C.t0, fontWeight:600, fontSize:'12px', cursor:'pointer' }}>Apri categorie</button>
+    <div style={{ padding:'12px 14px', marginBottom:'16px', borderRadius:'10px', background: isLight ? '#fbf1e1' : 'rgba(226,179,65,0.10)', border:'1px solid '+(isLight ? '#ecd3a8' : 'rgba(226,179,65,0.25)'), fontSize:'12.5px', color:C.t0 }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', flexWrap:'wrap' }}>
+        <span style={{ lineHeight:1.45 }}>{unclassified === 1 ? '1 gruppo non ha' : unclassified + ' gruppi non hanno'} un macro-gruppo: per ora {unclassified === 1 ? 'conta' : 'contano'} come «Variabili essenziali».</span>
+        <button onClick={() => setClassifyOpen(!classifyOpen)} style={{ padding:'7px 12px', borderRadius:'8px', border:'none', background:'#5b8def', color:'#fff', fontWeight:600, fontSize:'12.5px', cursor:'pointer' }}>{classifyOpen ? 'Chiudi' : 'Classifica i gruppi'}</button>
+      </div>
+      {classifyOpen ? classifyPanel : null}
     </div>
   ) : null;
 
@@ -1069,8 +1147,8 @@ export default function Dashboard({ app }){
   const renderPatrimonio = () => {
     const m12 = monthsBack(month, 12);
     const classOf = (a) => ACC_CLASS[a.type] || 'altro';
-    const stacks = ACC_CLASSES.map(cl => ({ label:cl.label, color:cl.color, values: m12.map(mo => sum(st.accounts.filter(a => classOf(a)===cl.key).map(a => Math.max(0, bal.at(a.id, mo))))) }));
-    const debts = m12.map(mo => sum(st.accounts.map(a => Math.min(0, bal.at(a.id, mo)))));
+    const stacks = ACC_CLASSES.map(cl => ({ label:cl.label, color:cl.color, values: m12.map(mo => sum(st.accounts.filter(a => classOf(a)===cl.key).map(a => Math.max(0, accVal(a, mo))))) }));
+    const debts = m12.map(mo => sum(st.accounts.map(a => Math.min(0, accVal(a, mo)))));
     const net = m12.map(mo => netWorthAt(mo));
     const nw = net[net.length-1], nwPrev = netWorthAt(addM(month,-1)), nw12 = netWorthAt(addM(month,-12));
     const dM = nw - nwPrev, d12 = nw - nw12;
@@ -1106,7 +1184,7 @@ export default function Dashboard({ app }){
                     return (
                       <div key={cl.key} style={{ marginBottom:'10px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:'7px', fontSize:'12px', color:C.t1, fontWeight:700, padding:'4px 0' }}><span style={{ width:'9px', height:'9px', borderRadius:'2px', background:cl.color }} />{cl.label}</div>
-                        {accs.map(a => { const b = bal.at(a.id, month), dd = b - bal.at(a.id, addM(month,-1)); return (
+                        {accs.map(a => { const b = accVal(a, month), dd = b - accVal(a, addM(month,-1)); return (
                           <div key={a.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', padding:'7px 0', borderBottom:'1px solid '+C.b1, fontSize:'13px' }}>
                             <span style={{ minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.name} <span style={{ color:C.t2, fontSize:'11.5px' }}>{a.bank && a.bank!=='—' && a.bank!==a.name ? a.bank : ''}</span></span>
                             <span style={{ display:'flex', gap:'10px', alignItems:'baseline', flexShrink:0 }}>
@@ -1158,7 +1236,207 @@ export default function Dashboard({ app }){
     );
   };
 
-  const body = tab === 'spese' ? renderSpese() : tab === 'budgetvs' ? renderBudgetVs() : tab === 'entrate' ? renderEntrate() : tab === 'patrimonio' ? renderPatrimonio() : renderOverview();
+
+  /* ============================== 6. INVESTIMENTI (modalità A) ============================== */
+  const renderInvestimenti = () => {
+    const invAccs = st.accounts.filter(isInvest);
+    if(!invAccs.length) return (
+      <Panel C={C}><Empty C={C} text="Non hai conti di investimento. Crea un conto di tipo Broker, Crypto o Fondo pensione e registra i versamenti come trasferimenti verso quel conto." actionLabel="Aggiungi un conto" onAction={() => app.newAccount()} /></Panel>
+    );
+    const selAcc = invAccs.find(a => a.id === dash.invAccount);
+    const globalStart = st.transactions.reduce((m, t) => (t.date && (!m || t.date < m)) ? t.date : m, '');
+    const sel = selAcc ? [selAcc] : invAccs;
+    const endDate = (mo) => mo === cur ? today : app.lastDayOf(mo);
+    const ms = (d) => new Date(d + 'T12:00:00').getTime();
+    const startDate = (a) => {
+      const c = [];
+      if(invFlows.first[a.id]) c.push(invFlows.first[a.id]);
+      const v = (valsByAcc[a.id] || [])[0]; if(v) c.push(v.month + '-01');
+      // Senza movimenti né valutazioni, il saldo iniziale si considera versato all'inizio dei dati.
+      return c.length ? c.sort()[0] : (globalStart || null);
+    };
+    const capitalAt = (a, mo) => {
+      const end = app.lastDayOf(mo);
+      return Math.max(0, pn(a.initialBalance)) - sum((invFlows.m[a.id] || []).filter(f => f.date <= end).map(f => f.v));
+    };
+    const flowsFor = (a, mo) => {
+      const end = endDate(mo); const out = [];
+      const init = pn(a.initialBalance); const sd = startDate(a);
+      if(init > 0 && sd) out.push({ t: ms(sd), v: -init });
+      (invFlows.m[a.id] || []).forEach(f => { if(f.date <= end) out.push({ t: ms(f.date), v: f.v }); });
+      out.push({ t: ms(end), v: accVal(a, mo) });
+      return out;
+    };
+    const perfOf = (accs, mo) => {
+      const value = sum(accs.map(a => accVal(a, mo)));
+      const capital = sum(accs.map(a => capitalAt(a, mo)));
+      const gain = value - capital;
+      const flows = [].concat(...accs.map(a => flowsFor(a, mo)));
+      const ts = flows.filter(f => f.v < 0).map(f => f.t);
+      const spanDays = ts.length ? (ms(endDate(mo)) - Math.min(...ts)) / 864e5 : 0;
+      const annual = spanDays >= 365 ? xirr(flows) : null;
+      return { value, capital, gain, gainPct: capital > 0 ? (gain / capital) * 100 : null, annual: annual == null ? null : annual * 100, spanDays };
+    };
+
+    const now = perfOf(sel, month);
+    const prevMo = addM(month, -1);
+    const prev = perfOf(sel, prevMo);
+    const dValue = now.value - prev.value, dCapital = now.capital - prev.capital, dMarket = dValue - dCapital;
+    const yearStart = month.slice(0,4) + '-01-01';
+    const contribYear = -sum([].concat(...sel.map(a => invFlows.m[a.id] || [])).filter(f => f.date >= yearStart && f.date <= app.lastDayOf(month)).map(f => f.v));
+    const missing = sel.filter(a => !(valsByAcc[a.id] || []).some(v => v.month === month));
+    const lastVal = (a) => { const arr = valsByAcc[a.id] || []; const v = arr.filter(x => x.month <= month).slice(-1)[0]; return v ? v.month : null; };
+
+    // Grafico: valore di mercato vs capitale netto investito
+    const range = dash.invRange || '12';
+    let months;
+    if(range === 'all'){
+      const firsts = sel.map(startDate).filter(Boolean).sort();
+      const from = firsts.length ? firsts[0].slice(0,7) : addM(month,-11);
+      months = []; let m = from; while(m <= month && months.length < 240){ months.push(m); m = addM(m,1); }
+      if(months.length < 2) months = monthsBack(month, 2);
+    } else months = monthsBack(month, parseInt(range,10));
+    const valueSeries = months.map(mo => sum(sel.map(a => accVal(a, mo))));
+    const capitalSeries = months.map(mo => sum(sel.map(a => capitalAt(a, mo))));
+
+    // Investimenti registrati come spese (non entrano nel capitale investito)
+    const invCats = st.categories.filter(c => c.type === 'Expense' && /invest|\bpac\b|\betf\b|azion/i.test(c.name || ''));
+    const invCatSet = {}; invCats.forEach(c => { invCatSet[c.id] = 1; });
+    const asExpense = st.transactions.filter(t => t.type === 'Expense' && invCatSet[t.categoryId]);
+
+    const months12Label = (mo) => mo ? app.monthLabel(mo) : 'mai';
+    const th = { textAlign:'right', padding:'8px 8px', fontSize:'11.5px', color:C.t2, fontWeight:600, whiteSpace:'nowrap', borderBottom:'1px solid '+C.b2 };
+    const td = { textAlign:'right', padding:'9px 8px', fontFamily:MONO, fontSize:'12.5px', whiteSpace:'nowrap', borderBottom:'1px solid '+C.b1 };
+    const gainColor = (g) => Math.abs(g) < 0.5 ? C.t0 : (g > 0 ? P.green : P.red);
+
+    const openDraft = () => {
+      const values = {};
+      invAccs.forEach(a => { const v = (valsByAcc[a.id] || []).find(x => x.month === month); values[a.id] = v ? String(pn(v.value)).replace('.', ',') : ''; });
+      setValDraft({ month, values });
+    };
+    const saveDraft = () => {
+      if(!valDraft || !app.store) return;
+      const entries = Object.keys(valDraft.values).filter(id => String(valDraft.values[id]).trim() !== '').map(id => [id, pn(valDraft.values[id])]);
+      if(app.store.upsertValuations) app.store.upsertValuations(valDraft.month, entries);
+      else entries.forEach(e => { const ex = valuations.find(v => v.accountId === e[0] && v.month === valDraft.month); if(ex) app.store.update('Valuations', ex.id, { value:e[1] }); else app.store.create('Valuations', { accountId:e[0], month:valDraft.month, value:e[1] }); });
+      setValDraft(null); app.refresh(); app.forceUpdate();
+    };
+    const removeVal = (v) => { if(!app.store) return; app.store.remove('Valuations', v.id); app.refresh(); app.forceUpdate(); };
+    const history = valuations.filter(v => sel.some(a => a.id === v.accountId)).sort((a,b) => b.month.localeCompare(a.month)).slice(0, 12);
+    const accById = {}; st.accounts.forEach(a => { accById[a.id] = a; });
+    const draftOpen = valDraft && valDraft.month === month;
+
+    return (
+      <React.Fragment>
+        <div style={{ display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap', marginBottom:'14px' }}>
+          <select value={selAcc ? selAcc.id : ''} onChange={(e) => setDash({ invAccount:e.target.value })} style={selectStyle}>
+            <option value="">Tutti gli investimenti</option>
+            {invAccs.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </div>
+        {asExpense.length ? (
+          <div style={{ padding:'10px 14px', marginBottom:'14px', borderRadius:'10px', background: isLight ? '#fbf1e1' : 'rgba(226,179,65,0.10)', border:'1px solid '+(isLight ? '#ecd3a8' : 'rgba(226,179,65,0.25)'), fontSize:'12.5px', lineHeight:1.45 }}>
+            Ci sono {asExpense.length} uscite in «{invCats.map(c => c.name).join('», «')}» per {app.fmtEur(sum(asExpense.map(t => pn(t.amount))))}: non entrano nel capitale investito. Se sono versamenti al broker, registrali come trasferimenti verso il conto di investimento.
+          </div>
+        ) : null}
+        <div style={kpiGrid}>
+          <KpiCard C={C} P={P} label="Valore di mercato" value={mask(e0(now.value))} level={missing.length ? 'warn' : null}
+            compare={missing.length ? (missing.length === 1 ? missing[0].name + ' senza valore di ' : missing.length + ' conti senza valore di ') + abbr(month) : 'Valutato a fine ' + abbr(month)} />
+          <KpiCard C={C} P={P} label="Capitale netto investito" value={mask(e0(now.capital))} compare={'Versato nel ' + month.slice(0,4) + ': ' + mask(e0(contribYear))} />
+          <KpiCard C={C} P={P} label="Guadagno latente" value={mask(signed(now.gain))} valueColor={gainColor(now.gain)}
+            compare={(now.gainPct == null ? '—' : signedPct(now.gainPct)) + ' sul capitale investito'} />
+          <KpiCard C={C} P={P} label={now.annual != null ? 'Rendimento annuo' : 'Rendimento'} value={now.annual != null ? signedPct(now.annual) : signedPct(now.gainPct)}
+            valueColor={gainColor(now.annual != null ? now.annual : (now.gainPct || 0))}
+            compare={now.annual != null ? 'Ponderato sui versamenti (XIRR)' : 'Meno di un anno di storico: non annualizzato'} />
+          <KpiCard C={C} P={P} label={'Variazione di ' + abbr(month)} value={mask(signed(dValue))} valueColor={gainColor(dValue)}
+            compare={'Versamenti ' + mask(signed(dCapital)) + ' · mercato ' + mask(signed(dMarket))} />
+        </div>
+        <Panel C={C} title="Valore e capitale investito" style={{ marginBottom:'16px' }}
+          sub="Linea piena: valore di mercato. Tratteggio: capitale netto versato. L'area è verde quando sei in guadagno, rossa in perdita."
+          right={<Segmented C={C} value={range} onChange={(v) => setDash({ invRange:v })} options={[['12','12 mesi'],['36','3 anni'],['all','Tutto']]} />}>
+          <IncomeExpenseChart C={C} P={P} labels={months.map(abbr)} income={valueSeries} expense={capitalSeries} onMonth={(i) => setDash({ month:months[i] })}
+            aColor="#e2b341" bColor={C.t1} bDash="5 4" aName="valore" bName="capitale" aria="Valore di mercato e capitale investito" />
+          <Legend C={C} items={[{ color:'#e2b341', label:'Valore di mercato' }, { color:C.t1, label:'Capitale netto', dash:'5 4' }, { color:P.green, label:'Guadagno' }, { color:P.red, label:'Perdita' }]} />
+        </Panel>
+        <div style={grid2}>
+          <Panel C={C} title={'Valori di fine ' + abbr(month)} sub="Inserisci il valore di ogni conto letto dall'estratto del broker. Aggiorna anche il Patrimonio e il saldo del conto.">
+            {month > cur ? <Empty C={C} text="Non puoi inserire il valore di un mese futuro." /> : !draftOpen ? (
+              <React.Fragment>
+                <div style={{ display:'flex', flexDirection:'column' }}>
+                  {invAccs.map(a => { const v = (valsByAcc[a.id] || []).find(x => x.month === month); return (
+                    <div key={a.id} style={{ display:'flex', justifyContent:'space-between', gap:'10px', padding:'8px 0', borderBottom:'1px solid '+C.b1, fontSize:'13px' }}>
+                      <span style={{ minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.name}</span>
+                      <span style={{ fontFamily:MONO, color: v ? C.t0 : C.t2 }}>{v ? mask(app.fmtEur(pn(v.value))) : 'da inserire'}</span>
+                    </div>
+                  ); })}
+                </div>
+                <button onClick={openDraft} style={{ marginTop:'14px', padding:'9px 15px', borderRadius:'9px', border:'none', background:'#5b8def', color:'#fff', fontWeight:700, fontSize:'13px', cursor:'pointer' }}>Aggiorna i valori</button>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+                  {invAccs.map(a => (
+                    <label key={a.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', fontSize:'13px' }}>
+                      <span style={{ minWidth:0 }}>
+                        <span style={{ display:'block', fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.name}</span>
+                        <span style={{ display:'block', fontSize:'11.5px', color:C.t2 }}>Stima attuale {mask(e0(accVal(a, month)))}</span>
+                      </span>
+                      <input inputMode="decimal" placeholder="Valore €" value={valDraft.values[a.id] || ''} aria-label={'Valore di ' + a.name}
+                        onChange={(e) => setValDraft(Object.assign({}, valDraft, { values: Object.assign({}, valDraft.values, { [a.id]: e.target.value }) }))}
+                        style={{ width:'120px', flexShrink:0, textAlign:'right', padding:'8px 10px', background:C.bg0, border:'1px solid '+C.b2, borderRadius:'8px', fontFamily:MONO, fontSize:'13px', color:C.t0 }} />
+                    </label>
+                  ))}
+                </div>
+                <div style={{ display:'flex', gap:'10px', marginTop:'14px', flexWrap:'wrap' }}>
+                  <button onClick={saveDraft} style={{ padding:'9px 15px', borderRadius:'9px', border:'none', background:'#5b8def', color:'#fff', fontWeight:700, fontSize:'13px', cursor:'pointer' }}>Salva i valori</button>
+                  <button onClick={() => setValDraft(null)} style={{ padding:'9px 15px', borderRadius:'9px', border:'1px solid '+C.b3, background:'transparent', color:C.t0, fontWeight:600, fontSize:'13px', cursor:'pointer' }}>Annulla</button>
+                </div>
+                <div style={{ fontSize:'11.5px', color:C.t2, marginTop:'8px' }}>I campi lasciati vuoti non vengono modificati.</div>
+              </React.Fragment>
+            )}
+          </Panel>
+          <Panel C={C} title="Storico valutazioni" sub="Le ultime 12 inserite. Tocca × per eliminarne una.">
+            {history.length === 0 ? <Empty C={C} text="Nessuna valutazione inserita: finché non ne aggiungi una, il valore coincide con quanto hai versato." /> :
+              <div style={{ display:'flex', flexDirection:'column' }}>
+                {history.map(v => (
+                  <div key={v.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', padding:'7px 0', borderBottom:'1px solid '+C.b1, fontSize:'13px' }}>
+                    <span style={{ minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{app.monthLabel(v.month)} <span style={{ color:C.t2 }}>· {(accById[v.accountId] || {}).name || '—'}</span></span>
+                    <span style={{ display:'flex', alignItems:'center', gap:'8px', flexShrink:0 }}>
+                      <span style={{ fontFamily:MONO }}>{mask(app.fmtEur(pn(v.value)))}</span>
+                      <button onClick={() => removeVal(v)} aria-label={'Elimina valutazione di ' + app.monthLabel(v.month)} style={{ border:'none', background:'transparent', color:C.t2, fontSize:'17px', cursor:'pointer', lineHeight:1, padding:'2px 4px' }}>×</button>
+                    </span>
+                  </div>
+                ))}
+              </div>}
+          </Panel>
+        </div>
+        <Panel C={C} title="Per conto" sub={'Situazione a fine ' + abbr(month) + '. Dividendi e commissioni registrati sul conto contano come rendimento, non come versamenti.'} style={{ marginTop:'16px' }}>
+          <div style={{ overflowX:'auto', margin:'0 -4px' }}>
+            <table style={{ width:'100%', borderCollapse:'collapse', minWidth: isMobile ? '620px' : 0 }}>
+              <thead><tr>
+                <th style={Object.assign({}, th, { textAlign:'left' })}>Conto</th><th style={th}>Capitale netto</th><th style={th}>Valore</th><th style={th}>Guadagno</th><th style={th}>Rend. annuo</th><th style={th}>Ultimo valore</th>
+              </tr></thead>
+              <tbody>
+                {invAccs.map(a => { const pf = perfOf([a], month); return (
+                  <tr key={a.id} onClick={() => setDash({ invAccount: dash.invAccount === a.id ? '' : a.id })} style={{ cursor:'pointer', background: selAcc && selAcc.id === a.id ? 'rgba(91,141,239,0.10)' : 'transparent' }}>
+                    <td style={Object.assign({}, td, { textAlign:'left', fontFamily:'inherit', fontSize:'13px', fontWeight:600 })}>{a.name} <span style={{ color:C.t2, fontWeight:500, fontSize:'11.5px' }}>{app.typeLabelAcc(a.type)}</span></td>
+                    <td style={td}>{mask(e0(pf.capital))}</td>
+                    <td style={td}>{mask(e0(pf.value))}</td>
+                    <td style={Object.assign({}, td, { color: gainColor(pf.gain) })}>{mask(signed(pf.gain))} <span style={{ color:C.t2 }}>{pf.gainPct == null ? '' : signedPct(pf.gainPct)}</span></td>
+                    <td style={td}>{pf.annual == null ? '—' : signedPct(pf.annual)}</td>
+                    <td style={Object.assign({}, td, { fontFamily:'inherit', color: lastVal(a) === month ? C.t1 : P.amber })}>{months12Label(lastVal(a))}</td>
+                  </tr>
+                ); })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize:'11px', color:C.t2, marginTop:'10px', lineHeight:1.5 }}>Il rendimento annuo compare dopo almeno un anno di storico. Per i fondi pensione il capitale netto comprende solo i versamenti registrati come trasferimenti.</div>
+        </Panel>
+      </React.Fragment>
+    );
+  };
+
+  const body = tab === 'spese' ? renderSpese() : tab === 'budgetvs' ? renderBudgetVs() : tab === 'entrate' ? renderEntrate() : tab === 'patrimonio' ? renderPatrimonio() : tab === 'investimenti' ? renderInvestimenti() : renderOverview();
   return (
     <div style={{ maxWidth:'1080px', margin:'0 auto' }}>
       {tabsMobile}

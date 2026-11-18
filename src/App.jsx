@@ -1,7 +1,7 @@
 import React from 'react';
 import { createClient } from '@supabase/supabase-js';
 import './index.css';
-import Dashboard, { DASH_TABS, MACROS } from './Dashboard.jsx';
+import Dashboard, { DASH_TABS, MACROS, INVEST_TYPES } from './Dashboard.jsx';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -44,7 +44,7 @@ class App extends React.Component {
       collapsed: false,
       auth: { loggedIn:false, busy:false, username: rememberedUser, password:'', remember: !!rememberedUser, error:'', mode:'login', info:'', newPassword:'', newPassword2:'' },
       filters: { from:'', to:'', accountId:'', categoryId:'', type:'', search:'' },
-      dash: { tab:'overview', month:'', period:'1', accountId:'', macro:'', spendCat:'', chartMode:'all' },
+      dash: { tab:'overview', month:'', period:'1', accountId:'', macro:'', spendCat:'', chartMode:'all', invAccount:'', invRange:'12' },
       modal: { open:false, kind:null, mode:'create', data:{} },
       accounts: [],
       transactions: [],
@@ -200,6 +200,15 @@ class App extends React.Component {
         });
         save();
       },
+      // Valori di mercato di fine mese dei conti di investimento: un unico salvataggio cloud.
+      upsertValuations: (month, entries) => {
+        entries.forEach(([accountId, value]) => {
+          const ex = (db.Valuations||[]).find(v => v.month===month && v.accountId===accountId);
+          if (ex) db.Valuations = db.Valuations.map(r => r.id===ex.id ? Object.assign({}, r, { value }) : r);
+          else db.Valuations = (db.Valuations||[]).concat([{ id: uid('valuations'), accountId, month, value }]);
+        });
+        save();
+      },
       reset: () => { db = self.seed(); save(); },
       clearBudgets: () => { db.Budgets = []; save(); }
     };
@@ -315,9 +324,22 @@ class App extends React.Component {
   }
   typeLabelAcc(t){ const f = this.accountTypes.find(x => x[0]===t); return f ? f[1] : t; }
 
+  // Saldo mostrato: per i conti di investimento usa l'ultimo valore di mercato inserito
+  // (pagina Investimenti) più i movimenti successivi; per tutti gli altri è il saldo contabile.
   accountBalance(acc){
+    const book = this.bookBalance(acc);
+    if (!acc || !INVEST_TYPES[acc.type] || !this.store) return book;
+    const cur = this.today().slice(0,7);
+    const vals = this.store.all('Valuations').filter(v => v.accountId===acc.id && v.month<=cur).sort((a,b)=>a.month.localeCompare(b.month));
+    const last = vals[vals.length-1];
+    if (!last) return book;
+    return this.parseNum(last.value) + (book - this.bookBalance(acc, this.lastDayOf(last.month)));
+  }
+  // Saldo contabile (somma dei movimenti), opzionalmente fino a una data inclusa.
+  bookBalance(acc, upTo){
     let b = this.parseNum(acc.initialBalance);
     for (const t of this.state.transactions){
+      if (upTo && (t.date||'') > upTo) continue;
       const amt = this.parseNum(t.amount);
       if (t.type==='Income' && t.accountId===acc.id) b += amt;
       else if (t.type==='Expense' && t.accountId===acc.id) b -= amt;
@@ -1062,7 +1084,7 @@ class App extends React.Component {
     }
     return carry;
   }
-  onBudgetCash(){ return this.state.accounts.filter(a=>a.onBudget!==false).reduce((s,a)=>s+this.accountBalance(a),0); }
+  onBudgetCash(){ return this.state.accounts.filter(a=>a.onBudget!==false).reduce((s,a)=>s+this.bookBalance(a),0); }
   ageOfMoney(dMonths, dAcc){
     const inP=(d)=>dMonths.indexOf((d||'').slice(0,7))>-1;
     let exp=0; const active={};
@@ -1266,7 +1288,8 @@ class App extends React.Component {
       spese:['Spese','Dove vanno i soldi'],
       budgetvs:['Budget vs consuntivo','Stai rispettando il piano?'],
       entrate:['Entrate e risparmio','Quanto riesci a mettere da parte'],
-      patrimonio:['Patrimonio','Ti stai arricchendo?']
+      patrimonio:['Patrimonio','Ti stai arricchendo?'],
+      investimenti:['Investimenti','Quanto rendono i tuoi investimenti']
     };
     const titles = { dashboard: dashTitleMap[st.dash.tab] || dashTitleMap.overview, budget:['Budget','Assegna ogni euro alle tue categorie'], transactions:['Movimenti','Tutte le entrate, uscite e trasferimenti'], accounts:['Conti','Saldi aggiornati automaticamente'], categories:['Categorie','Organizza entrate e uscite'] };
     const navTitle = titles[st.view][0]; const navSubtitle = titles[st.view][1];
